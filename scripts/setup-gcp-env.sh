@@ -44,49 +44,19 @@ pip3 install --quiet --ignore-installed \
 KEY_PATH="/root/.config/gcloud/service-account-key.json"
 mkdir -p "$(dirname "$KEY_PATH")"
 
-# 1. 環境変数からJSONを読み取る
+# 環境変数からJSONを読み取る
 if [ -n "$GOOGLE_APPLICATION_CREDENTIALS_JSON" ]; then
     echo "環境変数からサービスアカウントキーを設定中..."
     # シングルクォートを削除してJSONを書き込む
     echo "$GOOGLE_APPLICATION_CREDENTIALS_JSON" | sed "s/^'//; s/'$//" > "$KEY_PATH"
     chmod 600 "$KEY_PATH"
     echo "✓ 環境変数からキーを設定しました"
-
-# 2. Secret Managerから読み取る
-elif [ -n "$GCP_SECRET_NAME" ]; then
-    echo "Secret Managerからサービスアカウントキーを取得中..."
-
-    # まず、Application Default Credentials で認証を試みる
-    if [ -n "$GOOGLE_APPLICATION_CREDENTIALS" ] && [ -f "$GOOGLE_APPLICATION_CREDENTIALS" ]; then
-        gcloud auth activate-service-account --key-file="$GOOGLE_APPLICATION_CREDENTIALS" 2>/dev/null || true
-    fi
-
-    # Secret Managerからキーを取得
-    PROJECT_ID="${GCP_PROJECT_ID:-main-project-477501}"
-    SECRET_NAME="${GCP_SECRET_NAME}"
-
-    if gcloud secrets versions access latest --secret="$SECRET_NAME" --project="$PROJECT_ID" > "$KEY_PATH" 2>/dev/null; then
-        chmod 600 "$KEY_PATH"
-        echo "✓ Secret Manager ($SECRET_NAME) からキーを取得しました"
-    else
-        echo "エラー: Secret Manager からキーを取得できませんでした"
-        echo "Secret名: $SECRET_NAME"
-        echo "プロジェクト: $PROJECT_ID"
-        exit 1
-    fi
-
-# 3. 既存のファイルを使用
 elif [ -f "$KEY_PATH" ]; then
     echo "既存のサービスアカウントキーを使用します: $KEY_PATH"
-
-# 4. いずれもない場合はエラー
 else
     echo "エラー: サービスアカウントキーが見つかりません"
     echo ""
-    echo "以下のいずれかの方法でキーを設定してください:"
-    echo "  1. 環境変数 GOOGLE_APPLICATION_CREDENTIALS_JSON にJSONを設定"
-    echo "  2. 環境変数 GCP_SECRET_NAME にSecret Manager のシークレット名を設定"
-    echo "  3. キーファイルを $KEY_PATH に配置"
+    echo "環境変数 GOOGLE_APPLICATION_CREDENTIALS_JSON にサービスアカウントキー（JSON）を設定してください"
     exit 1
 fi
 
