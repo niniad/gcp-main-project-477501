@@ -1,0 +1,10 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "name": "GCP Environment Setup",
+        "command": "bash .claude/skills/gcp-setup/setup.sh"
+      }
+    ]
+  }
+}
