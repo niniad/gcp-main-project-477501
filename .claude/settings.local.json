@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__bigquery__list_dataset_ids",
+      "Bash(gcloud storage buckets list:*)",
+      "Bash(where:*)",
+      "Bash(gcloud:*)"
+    ]
+  }
+}
