@@ -60,7 +60,8 @@ NocoDB（手動入力・マスタデータ管理）と BigQuery（データ統�
     ├─ 代行会社取引 (nocodb.agency_transactions)
     ├─ セールモンスター売上 (nocodb.sale_monster_reports)
     ├─ 手動仕訳 (nocodb.manual_journal_entries)
-    └─ 開業費 (nocodb.startup_cost_entries)
+    ├─ 開業費 (nocodb.startup_cost_entries)
+    └─ 棚卸仕訳 (accounting.inventory_journal_view) ★2025〜
                               │
                               ▼
   BQ: accounting.pl_journal_entries VIEW（pl_contribution付き）
@@ -150,7 +151,7 @@ API ベース URL: `http://localhost:8080/api/v2`
 
 ### 5.1 accounting.journal_entries VIEW
 
-**目的:** 7つのデータソースを統一した複式簿記の仕訳帳フォーマットで統合
+**目的:** 9つのデータソースを統一した複式簿記の仕訳帳フォーマットで統合
 
 **カラム構成:**
 
@@ -166,7 +167,7 @@ API ベース URL: `http://localhost:8080/api/v2`
 | description | STRING | 摘要 |
 | source_table | STRING | データソース識別子 |
 
-**8つのデータソースと仕訳日の基準:**
+**9つのデータソースと仕訳日の基準:**
 
 | source_table | データソース | 仕訳日の基準 |
 |---|---|---|
@@ -178,6 +179,7 @@ API ベース URL: `http://localhost:8080/api/v2`
 | sale_monster | セールモンスター売上レポート | 売上日 |
 | manual_journal | 手動仕訳テーブル | 仕訳日 |
 | startup_cost | 開業費テーブル | 仕訳日 |
+| inventory_adjustment | 棚卸仕訳（期首・期末） | 1/1（期首）, 12/31（期末） |
 
 **複式簿記の展開方式（各ソース共通）:**
 各トランザクションは借方（debit）と貸方（credit）の 2 行に展開される。例:
@@ -188,16 +190,61 @@ API ベース URL: `http://localhost:8080/api/v2`
 銀行明細の代行会社向け送金は `is_transfer=TRUE` だが資産勘定として計上が必要なため、VIEW 内で特別処理している:
 - 楽天銀行 Cr（出金）+ 代行会社（ESPRIME/THE直行便）Dr（預け金増加）
 
-### 5.2 accounting.account_map テーブル
+### 5.2 accounting.inventory_journal_view VIEW
+
+**目的:** FBA月次在庫データ × 標準原価から年度ごとの棚卸仕訳を自動生成
+
+**データソース:**
+- `sp_api_external.ledger-summary-view-data` — 12月末のSELLABLE在庫数量
+- `nocodb.standard_cost_history` — SKU別標準原価（年次設定）
+- `nocodb.product_master` — MSKU → products_id の紐付け
+
+**仕訳パターン（FY Y）:**
+- **期首（Y/1/1）:** Dr. 仕入高 / Cr. 商品 — 前年末在庫を売上原価に振替
+- **期末（Y/12/31）:** Dr. 商品 / Cr. 仕入高 — 当年末在庫を売上原価から控除
+
+**原価評価ルール:** FY Y の期首・期末ともに FY Y の標準原価で評価（effective_start_date が FY Y に含まれるコスト）
+
+**年度選定:** 期首・期末の両方のデータが存在する年度のみ生成（過年度P&L保護）
+
+**現在の出力（2025年度）:**
+| エントリ | 金額 |
+|---------|------|
+| 期首（2025/1/1） | ¥483,968（12/2024在庫 × 2025原価） |
+| 期末（2025/12/31） | ¥502,320（12/2025在庫 × 2025原価） |
+| P&L影響 | +¥18,352（仕入高純減） |
+
+### 5.3 accounting.freee_account_mapping テーブル
+
+**目的:** journal_entries の `account_name` を freee API の `account_item_id` + `tax_code` にマッピング
+
+**カラム:** account_name, freee_account_item_id (INT64), tax_code (INT64), notes
+
+**税区分ルール:**
+| 科目種別 | tax_code | freee表示 |
+|---------|----------|----------|
+| 課税売上（売上高等） | 129 | 課税売上10% |
+| 課対仕入（経費・仕入） | 136 | 課対仕入10% |
+| 非課税・対象外（銀行口座・BS等） | 2 | 対象外 |
+
+### 5.4 accounting.freee_journal_payload_view VIEW
+
+**目的:** journal_entries（Amazon精算除外）を freee manual_journals API 形式に変換
+
+**出力:** source_id, issue_date, json_details (ARRAY<STRUCT: entry_side, account_item_id, tax_code, amount, description>)
+
+**対象:** fiscal_year = 2025, source_table != 'amazon_settlement'（Amazon精算は settlement_journal_payload_view で処理）
+
+### 5.5 accounting.account_map テーブル
 
 Amazon精算レポートの `account_item_id`（freee の科目ID）を `account_name`（勘定科目名）に変換するマッピングテーブル。
 
-### 5.3 accounting.merchant_account_rules テーブル
+### 5.6 accounting.merchant_account_rules テーブル
 
 NTTファイナンスカードの加盟店名に対して勘定科目をオーバーライドするルールテーブル。
 例: 特定の加盟店名 → `研究開発費`、`地代家賃` 等に変換。
 
-### 5.4 nocodb.account_items テーブル（freee勘定科目）
+### 5.7 nocodb.account_items テーブル（freee勘定科目）
 
 NocoDB の `freee勘定科目` テーブルが BQ に同期されたもの。
 会計分類の最重要マスタ。
@@ -223,7 +270,7 @@ NocoDB の `freee勘定科目` テーブルが BQ に同期されたもの。
 | 繰延資産 | **非対象** | 開業費（P&L影響なし） |
 | 資産・負債等 | **非対象** | 銀行口座、預け金、事業主借等 |
 
-### 5.5 accounting.pl_journal_entries VIEW
+### 5.8 accounting.pl_journal_entries VIEW
 
 **目的:** `journal_entries` に `pl_contribution`（P&L寄与額）を加えた分析用ビュー
 
@@ -274,6 +321,7 @@ ORDER BY fiscal_year
 |---|---|---|---|
 | 2023 | **-¥1,433,999** | -¥1,433,999 | ✅ 照合完了 |
 | 2024 | **-¥995,493** | -¥995,493 | ✅ 照合完了 |
+| 2025 | **-¥413,292** | （確定申告前） | 棚卸調整済み（期首¥483,968 / 期末¥502,320） |
 
 **P&L検証クエリ:**
 ```sql
