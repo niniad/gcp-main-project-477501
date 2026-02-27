@@ -60,7 +60,7 @@ NocoDB（手動入力・マスタデータ管理）と BigQuery（データ統�
     ├─ 代行会社取引 (nocodb.agency_transactions)
     ├─ セールモンスター売上 (nocodb.sale_monster_reports)
     ├─ 手動仕訳 (nocodb.manual_journal_entries)
-    ├─ 開業費 (nocodb.startup_cost_entries)
+    ├─ 事業主借 (nocodb.owner_contribution_entries)
     └─ 棚卸仕訳 (accounting.inventory_journal_view) ★2025〜
                               │
                               ▼
@@ -82,8 +82,9 @@ API ベース URL: `http://localhost:8080/api/v2`
 
 | テーブル名 | 用途 | BQ同期先テーブル |
 |---|---|---|
-| 手動仕訳 | 差異調整・事業主借経費（複式簿記） | nocodb.manual_journal_entries |
-| 開業費 | 開業準備費用（繰延資産、読み取り専用） | nocodb.startup_cost_entries |
+| 手動仕訳 | 差異調整仕訳（複式簿記、5件） | nocodb.manual_journal_entries |
+| 事業主借 | 個人資金拠出経費（複式簿記、117件） | nocodb.owner_contribution_entries |
+| 開業費 | ~~archived~~ 空テーブル（事業主借テーブルに移行済み） | ~~nocodb.startup_cost_entries~~ |
 | 楽天銀行ビジネス口座入出金明細 | CSV手動インポート（2023〜） | nocodb.rakuten_bank_statements |
 | PayPay銀行入出金明細 | CSV手動インポート（2025〜） | nocodb.paypay_bank_statements |
 | NTTファイナンスBizカード明細 | CSV手動インポート | nocodb.ntt_finance_statements |
@@ -103,9 +104,9 @@ API ベース URL: `http://localhost:8080/api/v2`
 | 輸入ロットマスタ | 船便単位ヘッダ | 不要 |
 | 輸入明細 | 製品別輸入数量（参照用のみ） | 不要 |
 
-### 3.3 手動仕訳テーブルの詳細
+### 3.3 事業主借テーブルの詳細
 
-手動仕訳は NocoDB で管理するすべての会計調整エントリの中核テーブル。
+個人資金で支払った事業経費を管理する複式簿記テーブル。元は開業費テーブル（67件）と手動仕訳テーブル（50件）に分散していたものを統合。
 
 **カラム構成:**
 
@@ -113,24 +114,32 @@ API ベース URL: `http://localhost:8080/api/v2`
 |---|---|---|
 | Id | 連番 | NocoDB内部ID（BQ同期時は nocodb_id） |
 | 仕訳日 | Date | 仕訳の日付（YYYY-MM-DD） |
-| 借方科目_id | Number | freee勘定科目テーブルの nocodb_id（数値） |
-| 貸方科目_id | Number | freee勘定科目テーブルの nocodb_id（数値） |
-| 借方科目 | LinkToAnotherRecord | freee勘定科目テーブルへのリンク（NocoDB UI表示用） |
-| 貸方科目 | LinkToAnotherRecord | freee勘定科目テーブルへのリンク（NocoDB UI表示用） |
+| 借方科目 | LinkToAnotherRecord | freee勘定科目テーブルへのリンク |
+| 貸方科目 | LinkToAnotherRecord | freee勘定科目テーブルへのリンク（基本的に85=事業主借） |
 | 金額 | Number | 仕訳金額（円） |
 | 摘要 | Text | 仕訳内容の説明 |
-| ソース | SingleSelect | 発生元（事業主借経費 / 開業費） |
-| 仕訳区分 | SingleSelect | 種別分類（下記参照） |
+| ソース | SingleLineText | 移行元追跡（開業費 / 事業主借 / 未払金経由→事業主借） |
+| 元支出日 | Date | 実際の支出日（任意） |
 
-**仕訳区分の種別:**
+**ソース別内訳（117件、¥995,069）:**
 
-| 仕訳区分 | 件数 | 内容 |
+| ソース | 件数 | 金額 | 内容 |
+|---|---|---|---|
+| 開業費 | 67件 | ¥600,736 | 2022年開業準備費用（Dr=開業費/Cr=事業主借） |
+| 事業主借 | 45件 | ¥371,258 | 楽天カード等で支払った事業経費 |
+| 未払金経由→事業主借 | 5件 | ¥23,075 | 個人クレカ支払い（旧Cr=未払金→Cr=事業主借に修正） |
+
+### 3.4 手動仕訳テーブルの詳細
+
+差異調整専用の仕訳テーブル（5件）。
+
+| Id | 仕訳区分 | 内容 |
 |---|---|---|
-| 事業主借経費 | 51件 | 楽天カード等で支払った事業経費（カード明細に出てくる費用） |
-| 差異調整（識別済み） | 2件 | Id=191,193: Amazon精算タイミング差・deposit_date移行調整（原因特定済み） |
-| 差異調整（残差） | 2件 | Id=190,192: 方法論差の残差（MF照合用、2024年で完了） |
-
-> 注: 開業費（103件）は専用テーブルに分離済み。手動仕訳テーブルの合計は55件。
+| 188 | 事業主借経費 | OCS国際送料 Dr=研究開発費/Cr=楽天銀行 ¥1,500 |
+| 190 | 差異調整（残差） | 2023年度 MF-BQ差異調整 Dr=消耗品費/Cr=事業主借 ¥7,874 |
+| 191 | 差異調整（識別済み） | 期首残高調整 Dr=事業主借/Cr=雑収入 ¥24,106 |
+| 192 | 差異調整（残差） | 2024年度 MF-BQ差異調整 Dr=事業主借/Cr=雑収入 ¥6,340 |
+| 193 | 差異調整（識別済み） | deposit_date基準移行調整 Dr=事業主借/Cr=雑収入 ¥62,501 |
 
 ---
 
@@ -177,8 +186,8 @@ API ベース URL: `http://localhost:8080/api/v2`
 | ntt_finance | NTTファイナンスBizカード明細 | 利用日 |
 | agency_transactions | 代行会社取引（振替テーブル） | 取引日 |
 | sale_monster | セールモンスター売上レポート | 売上日 |
-| manual_journal | 手動仕訳テーブル | 仕訳日 |
-| startup_cost | 開業費テーブル | 仕訳日 |
+| manual_journal | 手動仕訳テーブル（5件） | 仕訳日 |
+| owner_contribution | 事業主借テーブル（117件） | 仕訳日 |
 | inventory_adjustment | 棚卸仕訳（期首・期末） | 1/1（期首）, 12/31（期末） |
 
 **複式簿記の展開方式（各ソース共通）:**
@@ -387,9 +396,17 @@ SKIP_COLUMNS = {
 - ✅ accounting.pl_journal_entries VIEW 作成
 - ✅ settlement基準を deposit_date に変更（差異調整仕訳 Id=193 追加）
 - ✅ 為替差損益 small_category を 経費 に変更
-- ✅ 開業費を手動仕訳から専用テーブルに分離（103件）
 - ✅ 仕訳区分カラム追加・バックフィル
 - ✅ 借方科目/貸方科目の LinkToAnotherRecord 設定
+
+**完了済み（2026-02-26）:**
+- ✅ 事業主借テーブル新規作成（開業費67件＋手動仕訳50件を統合、117件）
+- ✅ 開業費テーブル→空（重複34件+調整2件を削除、67件は事業主借に移行）
+- ✅ 手動仕訳テーブル整理（55件→5件、差異調整のみ残す）
+- ✅ 未払金→事業主借 修正（5件、¥23,075）→ BS未払金残高ゼロ化
+- ✅ 開業費残高 ¥720,295 に修正（MF確定申告値と一致）
+- ✅ journal_entries VIEW更新（⑧startup_cost削除、⑩owner_contribution追加）
+- ✅ 全年度で貸借バランス imbalance=0 確認済み
 
 ---
 
