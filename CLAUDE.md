@@ -1,4 +1,8 @@
-# CLAUDE.md — gcp-main-project-477501
+# CLAUDE.md — accounting
+
+## コンパクション後の復帰手順
+
+コンパクション直後は必ず: (1) この CLAUDE.md を再読 (2) 現在のタスクを確認してから再開
 
 ## プロジェクト概要
 
@@ -107,7 +111,7 @@
 
 ### freee 同期
 1. BQ sync 完了後
-2. `cd C:/Users/ninni/projects/gcp-main-project-477501 && uv run --with requests --with google-cloud-secret-manager --with google-auth --with google-cloud-bigquery python tmp/freee_sync_fy2023.py`
+2. `cd C:/Users/ninni/projects/accounting && uv run --with requests --with google-cloud-secret-manager --with google-auth --with google-cloud-bigquery python tmp/freee_sync_fy2023.py`
 3. freee API で trial_bs/trial_pl 検証
 
 ## Python 実行環境

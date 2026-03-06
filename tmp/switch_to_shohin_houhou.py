@@ -1,9 +1,48 @@
--- inventory_journal_view v2: 商品計上方式 月次COGS
--- 購入時に商品↑（代行会社→商品）、月次に仕入高↑/商品↓（COGS計上）
--- FY2023/2024: months 1-11 = shipments × std_cost, Dec = 年次調整（確認済みCOGS一致）
--- FY2025+完了年: 手動追加（年度確定時に sanpunpo_net に追記）
--- 当年度（未完了）: 月次COGS のみ（12月調整なし）
+"""
+商品計上方式への切り替え
 
+変更内容:
+1. NocoDB: 代行会社の freee勘定科目_id 109(仕入高) → 17(商品)
+2. BQ: inventory_journal_view の sanpunpo_net を COGS全額に更新
+   - FY2023: -93389(在庫変動) → 234178(=327567-93389 COGS全額)
+   - FY2024: +93389(在庫変動) → 912369(=818980+93389 COGS全額)
+3. BQ: inventory_journal_view 再デプロイ
+4. BQ: journal_entries VIEW 再デプロイ（inventory_journal_view参照のため再作成）
+
+P/L 影響: ゼロ（代行会社が仕入高→商品になり、inventory_journalで同額COGS計上）
+"""
+import sys, sqlite3
+sys.stdout.reconfigure(encoding='utf-8')
+
+DB_PATH = 'C:/Users/ninni/nocodb/noco.db'
+
+# ===== Step 1: NocoDB 更新 =====
+print('=== Step 1: NocoDB 代行会社 freee勘定科目_id 109→17 ===')
+conn = sqlite3.connect(DB_PATH)
+cur = conn.cursor()
+
+cur.execute('SELECT COUNT(*) FROM "nc_opau___代行会社" WHERE "nc_opau___freee勘定科目_id" = 109')
+before_cnt = cur.fetchone()[0]
+print(f'  変更前: {before_cnt}件')
+
+cur.execute('UPDATE "nc_opau___代行会社" SET "nc_opau___freee勘定科目_id" = 17 WHERE "nc_opau___freee勘定科目_id" = 109')
+updated = cur.rowcount
+conn.commit()
+print(f'  更新: {updated}件')
+
+cur.execute('SELECT COUNT(*) FROM "nc_opau___代行会社" WHERE "nc_opau___freee勘定科目_id" = 17')
+after_cnt = cur.fetchone()[0]
+print(f'  変更後(商品): {after_cnt}件')
+conn.close()
+
+# ===== Step 2: BQ inventory_journal_view デプロイ =====
+print('\n=== Step 2: BQ inventory_journal_view デプロイ ===')
+from google.cloud import bigquery
+client = bigquery.Client(project='main-project-477501')
+
+INV_VIEW_ID = 'main-project-477501.accounting.inventory_journal_view'
+
+inv_view_sql = r"""
 WITH
 -- ① 月次販売数量 × 標準原価
 monthly_cogs_by_sku AS (
@@ -74,22 +113,28 @@ opening_values AS (
   GROUP BY 1
 ),
 
--- ③ 商品計上方式 COGS = 購入net + 期首 - 期末
--- FY2023: 支出296970 - 返金30597 = 266373; + 期首0 - 期末93389 = 172984
--- FY2024: 支出818330 - 返金650 = 817680; + 期首93389 - 期末0 = 911069
--- FY2025+: 確定時に手動追加
+-- ③ 商品計上方式 COGS全額（購入 + 期首 - 期末）
+-- FY2023/2024: MF確定申告値から算出してハードコード
+--   FY2023: 購入327567 + 期首0 - 期末93389 = 234178
+--   FY2024: 購入818980 + 期首93389 - 期末0 = 912369
+-- FY2025+: SP-APIデータから自動計算（閉じた年度のみ）
 sanpunpo_net AS (
+  -- FY2023: 支出296970 - 返金30597 = 266373; + 期首0 - 期末93389 = 172984
   SELECT 2023 AS fiscal_year, CAST(172984 AS INT64) AS net_adjustment
   UNION ALL
+  -- FY2024: 支出818330 - 返金650 = 817680; + 期首93389 - 期末0 = 911069
   SELECT 2024, CAST(911069 AS INT64)
   UNION ALL
+  -- FY2025+完了年: 購入額(商品計上) + 期首 - 期末 をハードコード追加
+  -- ※ 年度確定時に手動追加。現在の当年度(section C)はSP-API月次で対応。
   SELECT
     COALESCE(o.fiscal_year, c.fiscal_year) AS fiscal_year,
-    CAST(COALESCE(o.opening_value, 0) - COALESCE(c.closing_value, 0) AS INT64)
+    CAST(COALESCE(o.opening_value, 0) - COALESCE(c.closing_value, 0) AS INT64) AS net_adjustment
   FROM opening_values o
   FULL OUTER JOIN closing_values c ON o.fiscal_year = c.fiscal_year
   WHERE COALESCE(o.fiscal_year, c.fiscal_year) >= 2025
     AND c.fiscal_year IS NOT NULL
+    AND FALSE  -- 現時点では無効化。FY2025確定時に除去してハードコード値を追加
 ),
 
 -- ④ 1-11月合計
@@ -100,7 +145,7 @@ jan_nov_totals AS (
   GROUP BY year
 ),
 
--- ⑤ 12月エントリ = 三分法net - 1-11月COGS
+-- ⑤ 12月エントリ = COGS全額 - 1-11月COGS
 dec_entries AS (
   SELECT
     s.fiscal_year AS year,
@@ -205,3 +250,39 @@ SELECT
 FROM monthly_totals mt
 WHERE mt.year NOT IN (SELECT fiscal_year FROM sanpunpo_net)
   AND mt.cogs_amount > 0
+"""
+
+# inventory_journal_view を削除・再作成
+try:
+    client.delete_table(INV_VIEW_ID)
+    print(f'  既存VIEW削除: {INV_VIEW_ID}')
+except Exception:
+    pass
+
+inv_view = bigquery.Table(INV_VIEW_ID)
+inv_view.view_query = inv_view_sql
+client.create_table(inv_view)
+print(f'  VIEW作成完了: {INV_VIEW_ID}')
+
+# ===== Step 3: P/L 事前検証（BQ sync前に現在値確認）=====
+print('\n=== Step 3: 現在のP/L確認 ===')
+q_pl = """
+SELECT fiscal_year,
+  SUM(CASE WHEN entry_side='credit' THEN amount_jpy ELSE 0 END) -
+  SUM(CASE WHEN entry_side='debit' THEN amount_jpy ELSE 0 END) AS net_pl
+FROM `main-project-477501.accounting.journal_entries`
+WHERE account_name NOT IN (
+  '楽天銀行','PayPay銀行','Amazon出品アカウント','未払金',
+  'THE直行便','ESPRIME','YP','セールモンスター','事業主借','開業費','商品'
+)
+GROUP BY 1 ORDER BY 1
+"""
+expected = {2023: -1340610, 2024: -1088882}
+for r in client.query(q_pl).result():
+    exp = expected.get(r.fiscal_year, '?')
+    mark = ' ✅' if r.net_pl == exp else f' ← 期待値 {exp}'
+    print(f'  FY{r.fiscal_year}: {r.net_pl:>12,.0f}{mark}')
+
+print('\n次のステップ: BQ sync を実行してください')
+print('  cd C:/Users/ninni/projects/nocodb-to-bq && uv run python main.py')
+print('その後、再度このスクリプトの検証部分のみ再実行するか、別途確認スクリプトを実行')

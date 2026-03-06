@@ -40,7 +40,7 @@ settlement_journal_view.booking_date = deposit_date  ★ 変更済み
 ```
 
 > 移行に伴い、年度またぎ精算（settlement 11898495253: settle=2024-12-30→deposit=2025-01-01）の
-> P&L寄与 ¥62,501 が 2024→2025 に移動したため、差異調整仕訳 Id=193 で補填済み。
+> P&L寄与 ¥62,501 が 2024→2025 に移動。ただし MF も deposit_date ベースのため FY2024/FY2025 の P&L 分類は MF と一致しており差異調整仕訳は不要。（旧参照「Id=193」は廃止、amazon_account_statements への AI 追加エントリも削除済み）
 
 ### 1.4 deposit_date を採用した理由
 
@@ -55,7 +55,7 @@ settlement_journal_view.booking_date = deposit_date  ★ 変更済み
 **実施済み（2026-02-25）:**
 全期間を deposit_date に変更し、差異調整仕訳を再計算済み。
 - 2023年: 年度またぎ精算なし → P&L変動なし
-- 2024年: 1件の年度またぎ精算 → 差異調整仕訳 Id=193 で補填済み
+- 2024年: 1件の年度またぎ精算 → deposit_date ベースで FY2025 に計上、MF も同様のため差異なし
 
 ### 1.5 freee連携時のフロー（deposit_dateベース）
 
@@ -310,3 +310,4 @@ deposit_date ベースを推奨（上記 §1 参照）。
 | 2026-02-25 | 初版作成。settlement基準、為替差損益、期末評価替え、開業費、科目分類方針を記録 |
 | 2026-02-25 | §1.3: deposit_date移行完了を反映。§2.2: small_category=経費変更を反映。§4.1: 開業費テーブル分離を反映 |
 | 2026-02-25 | §7: 棚卸資産評価方針を追加（標準原価法、inventory_journal_view、2025年度実績） |
+| 2026-03-05 | §1.3: Id=193参照を廃止（MFとの差異なし確認済み）。amazon_account_statementsへのAI追加エントリ（行695・行696）を削除。Amazon出品アカウント残高クリーン化 |

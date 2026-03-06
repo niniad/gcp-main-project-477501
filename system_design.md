@@ -1,454 +1,387 @@
 # EC事業 システム設計書
-*最終更新: 2026-03-03*
+*最終更新: 2026-03-06*
 
 ---
 
 ## 概要
 
 個人EC事業（Amazon.co.jp出品 + セールモンスター）の会計データを管理するシステム。
-NocoDB（手動入力・マスタデータ管理）と BigQuery（データ統合・P&L計算）を中心とした構成。
+NocoDB（手動入力・マスタデータ管理）→ BigQuery（データ統合・P&L計算）→ freee（確定申告）の3層構成。
 
 **システムの目的:**
-- Amazonの精算データ・銀行明細・経費をすべて BigQuery に集約し、正確な損益（P&L）を計算する
+- Amazonの精算データ・銀行明細・経費をBigQueryに集約し、正確な損益（P&L）を計算する
 - 年次確定申告用の財務データを生成する
-- 2023/2024年度: マネーフォワード確定申告値との照合完了（一致確認済み）
+- 2023/2024年度: マネーフォワード確定申告値との照合完了（完全一致確認済み）
 - **2025年以降: このシステムが唯一の会計記録**
 
 ---
 
-## 1. システム構成（コンポーネント一覧）
+## 1. システム構成
 
 | コンポーネント | 用途 | 場所 |
 |---|---|---|
-| **Amazon SP-API** | 精算レポート・売上データ（自動取得） | Amazonマーケットプレイス |
-| **Amazon Ads API** | 広告費データ（自動取得） | Amazonマーケットプレイス |
-| **Google Cloud Storage (GCS)** | API取得データの一次保存 | GCP: main-project-477501 |
+| **Amazon SP-API** | 精算レポート・売上データ（自動取得） | Amazon マーケットプレイス |
+| **Amazon Ads API** | 広告費データ（自動取得） | Amazon マーケットプレイス |
+| **Google Cloud Storage** | API取得データの一次保存 | GCP: main-project-477501 |
 | **BigQuery** | 全データの統合・仕訳計算・P&L分析 | GCP: main-project-477501 |
-| **NocoDB** | 手動入力データ管理（銀行明細・経費・商品マスタ等） | ローカル: localhost:8080, `C:/Users/ninni/nocodb/noco.db` |
+| **NocoDB** | 手動入力データ管理（銀行明細・経費・商品マスタ等） | ローカル: `C:/Users/ninni/nocodb/noco.db` |
 | **Cloud Run** | SP-API/Ads APIデータの定期取得ジョブ | GCP: main-project-477501 |
+| **freee** | 確定申告・試算表生成 | freee クラウド（会社ID: 11078943） |
 
 ---
 
 ## 2. データフロー全体図
 
 ```
-【自動取得】
-  Amazon SP-API ──────→ Cloud Run (spapi-to-gcs-daily)
-  Amazon Ads API ─────→ Cloud Run (amazon-ads-to-gcs-daily)
-                              │
-                              ▼
-                        GCS バケット ──→ BQ (sp_api_external, amazon_ads_external)
+【自動取得（Cloud Run 日次）】
+  Amazon SP-API ──→ GCS ──→ BQ: sp_api_external, amazon_ads_external
 
 【手動入力 → NocoDB】
-  銀行明細 (CSV) ────→ NocoDB: 楽天銀行/PayPay銀行入出金明細
-  カード明細 (CSV) ──→ NocoDB: NTTファイナンスBizカード明細
-  代行会社帳票 ──────→ NocoDB: 振替テーブル（ESPRIME/YP/THE直行便）
-  手動仕訳 ──────────→ NocoDB: 手動仕訳（差異調整・事業主借経費）
-  開業費 ──────────────→ NocoDB: 開業費（繰延資産、読み取り専用）
-  商品マスタ ────────→ NocoDB: 製品マスタ・標準原価履歴等
+  銀行明細CSV ────→ 楽天銀行/PayPay銀行入出金明細
+  カード明細CSV ──→ NTTファイナンスBizカード明細
+  代行会社帳票 ───→ 代行会社テーブル + 振替テーブル
+  手動調整仕訳 ───→ 手動仕訳テーブル（差異調整・為替差損益等）
+  事業主個人経費 ─→ 事業主借テーブル（楽天カード等で支払った事業費）
+  商品マスタ ────→ 製品マスタ・標準原価履歴等
 
-【NocoDB → BigQuery 定期同期（nocodb-to-bq/main.py）】
-  NocoDB の全テーブル ──→ BQ データセット nocodb（WRITE_TRUNCATE）
-  20テーブル対象
+【NocoDB → BigQuery 同期（手動実行）】
+  C:/Users/ninni/projects/nocodb-to-bq/main.py
+  全21テーブル WRITE_TRUNCATE で同期
 
-【BigQuery 内部処理（VIEW による仕訳統合）】
-  BQ: accounting.journal_entries VIEW
-    ├─ Amazon出品アカウント明細 (nocodb.amazon_account_statements) ★2026-03改修
-    ├─ PayPay銀行明細 (nocodb.paypay_bank_statements)
-    ├─ 楽天銀行明細 (nocodb.rakuten_bank_statements)
-    ├─ NTTファイナンス明細 (nocodb.ntt_finance_statements)
-    ├─ 代行会社取引 (nocodb.agency_transactions)
-    ├─ セールモンスター売上 (nocodb.sale_monster_reports)
-    ├─ 手動仕訳 (nocodb.manual_journal_entries)
-    ├─ 事業主借 (nocodb.owner_contribution_entries)
-    └─ 棚卸仕訳 (accounting.inventory_journal_view) ★2025〜
-                              │
-                              ▼
-  BQ: accounting.pl_journal_entries VIEW（pl_contribution付き）
-                              │
-                              ▼
-                        P&L分析・確定申告用データ
+【BigQuery 内部処理（VIEWによる仕訳統合）】
+  accounting.journal_entries VIEW
+    ├─ Amazon出品アカウント明細（amazon_account_statements）
+    ├─ PayPay銀行明細（paypay_bank_statements）
+    ├─ 楽天銀行明細（rakuten_bank_statements）
+    ├─ NTTファイナンス明細（ntt_finance_statements）
+    ├─ 代行会社取引（agency_transactions）
+    ├─ セールモンスター売上（sale_monster_reports）
+    ├─ 手動仕訳（manual_journal_entries）
+    ├─ 事業主借（owner_contribution_entries）
+    └─ 棚卸仕訳（inventory_journal_view）
+                    ↓
+  freee 同期スクリプト（年次確定申告時）
+  C:/Users/ninni/projects/nocodb-to-bq/.venv/Scripts/python.exe
+      tmp/freee_sync_fy2025.py
 ```
 
 ---
 
 ## 3. NocoDB テーブル構成
 
-NocoDB は `http://localhost:8080` で稼働するローカルのノーコードデータベース。
-SQLite ファイル: `C:/Users/ninni/nocodb/noco.db`
-API ベース URL: `http://localhost:8080/api/v2`
+**NocoDB**: `http://localhost:8080` | SQLite: `C:/Users/ninni/nocodb/noco.db`
 
-### 3.1 会計・財務系テーブル（BQ同期対象）
+### 3.1 会計・財務系テーブル（BQ同期対象・21テーブル中の主要テーブル）
 
-| テーブル名 | 用途 | BQ同期先テーブル |
-|---|---|---|
-| 手動仕訳 | 差異調整仕訳（複式簿記、8件） | nocodb.manual_journal_entries |
-| 事業主借 | 個人資金拠出経費（複式簿記、124件） | nocodb.owner_contribution_entries |
-| 開業費 | ~~archived~~ 空テーブル（事業主借テーブルに移行済み） | ~~nocodb.startup_cost_entries~~ |
-| Amazon出品アカウント明細 | Amazon精算データの口座視点明細（694件） | nocodb.amazon_account_statements |
-| 楽天銀行ビジネス口座入出金明細 | CSV手動インポート（2023〜） | nocodb.rakuten_bank_statements |
-| PayPay銀行入出金明細 | CSV手動インポート（2025〜） | nocodb.paypay_bank_statements |
-| NTTファイナンスBizカード明細 | CSV手動インポート | nocodb.ntt_finance_statements |
-| 振替 | 口座間の資金移動リンク（93件） | nocodb.transfer_records |
-| 代行会社 | 代行会社取引（ESPRIME/YP/THE直行便） | nocodb.agency_transactions |
-| セールモンスター売上レポート | CSV手動インポート | nocodb.sale_monster_reports |
-| freee勘定科目 | 勘定科目マスタ（account_name/small_category等） | nocodb.account_items |
-
-### 3.2 商品マスタ系テーブル
-
-| テーブル名 | 用途 | BQ同期 |
-|---|---|---|
-| 製品マスタ | SKU/ASINマスタ | 必要（nocodb.dim_products） |
-| 標準原価履歴 | SKU別標準原価（年次手動更新） | 必要 |
-| 購入商品マスタ | 中国仕入れ部品マスタ（PRD/MAT） | 不要 |
-| 発注ロットマスタ | PO単位ヘッダ | 不要 |
-| 発注明細 | POの品目・数量・外貨単価 | 不要（標準原価は年1回手動更新） |
-| 輸入ロットマスタ | 船便単位ヘッダ | 不要 |
-| 輸入明細 | 製品別輸入数量（参照用のみ） | 不要 |
-
-### 3.3 事業主借テーブルの詳細
-
-個人資金で支払った事業経費を管理する複式簿記テーブル。元は開業費テーブル（67件）と手動仕訳テーブル（50件）に分散していたものを統合。
-
-**カラム構成:**
-
-| カラム | 型 | 説明 |
-|---|---|---|
-| Id | 連番 | NocoDB内部ID（BQ同期時は nocodb_id） |
-| 仕訳日 | Date | 仕訳の日付（YYYY-MM-DD） |
-| 借方科目 | LinkToAnotherRecord | freee勘定科目テーブルへのリンク |
-| 貸方科目 | LinkToAnotherRecord | freee勘定科目テーブルへのリンク（基本的に85=事業主借） |
-| 金額 | Number | 仕訳金額（円） |
-| 摘要 | Text | 仕訳内容の説明 |
-| ソース | SingleLineText | 移行元追跡（開業費 / 事業主借 / 未払金経由→事業主借） |
-| 元支出日 | Date | 実際の支出日（任意） |
-
-**ソース別内訳（117件、¥995,069）:**
-
-| ソース | 件数 | 金額 | 内容 |
+| テーブル名 | 行数 | 用途 | BQ同期先 |
 |---|---|---|---|
-| 開業費 | 67件 | ¥600,736 | 2022年開業準備費用（Dr=開業費/Cr=事業主借） |
-| 事業主借 | 45件 | ¥371,258 | 楽天カード等で支払った事業経費 |
-| 未払金経由→事業主借 | 5件 | ¥23,075 | 個人クレカ支払い（旧Cr=未払金→Cr=事業主借に修正） |
+| **楽天銀行ビジネス口座入出金明細** | 140 | CSV手動インポート。2023〜2025-06まで主力 | `nocodb.rakuten_bank_statements` |
+| **PayPay銀行入出金明細** | 129 | CSV手動インポート。2025-06〜現在の主力 | `nocodb.paypay_bank_statements` |
+| **Amazon出品アカウント明細** | 694 | Amazon精算の口座視点明細（自動生成はしない・別途管理） | `nocodb.amazon_account_statements` |
+| **NTTファイナンスBizカード明細** | 219 | CSV手動インポート | `nocodb.ntt_finance_statements` |
+| **代行会社** | 226 | ESPRIME/YP/THE直行便との取引 | `nocodb.agency_transactions` |
+| **振替** | 111 | 口座間資金移動のリンクテーブル | `nocodb.transfer_records` |
+| **手動仕訳** | 7 | 差異調整・為替差損益等の特殊仕訳 | `nocodb.manual_journal_entries` |
+| **事業主借** | 127 | 個人資金で支払った事業経費（楽天カード等） | `nocodb.owner_contribution_entries` |
+| **freee勘定科目** | 166 | 勘定科目マスタ（nocodb_id ↔ freee account_item_id） | `nocodb.account_items` |
+| **セールモンスター売上レポート** | 119 | CSV手動インポート | `nocodb.sale_monster_reports` |
 
-### 3.4 手動仕訳テーブルの詳細
+> ⚠️ **開業費テーブルは削除済み（2026-03-06）**。開業費エントリは事業主借テーブル内（source='開業費'）で管理。
 
-差異調整専用の仕訳テーブル（5件）。
+### 3.2 商品マスタ系テーブル（BQ同期対象）
 
-| Id | 仕訳区分 | 内容 |
-|---|---|---|
-| 188 | 事業主借経費 | OCS国際送料 Dr=研究開発費/Cr=楽天銀行 ¥1,500 |
-| 190 | 差異調整（残差） | 2023年度 MF-BQ差異調整 Dr=消耗品費/Cr=事業主借 ¥7,874 |
-| 191 | 差異調整（識別済み） | 期首残高調整 Dr=事業主借/Cr=雑収入 ¥24,106 |
-| 192 | 差異調整（残差） | 2024年度 MF-BQ差異調整 Dr=事業主借/Cr=雑収入 ¥6,340 |
-| 193 | 差異調整（識別済み） | deposit_date基準移行調整 Dr=事業主借/Cr=雑収入 ¥62,501 |
-
----
-
-## 4. BigQuery データセット構成
-
-| データセット | 内容 | 状態 |
-|---|---|---|
-| `sp_api_external` | SP-API raw data（精算レポート・売上・FBA在庫等） | 稼働中 |
-| `amazon_ads_external` | 広告API raw data | 稼働中 |
-| `nocodb` | NocoDB 全テーブルのエクスポート先（21テーブル） | 稼働中 |
-| `accounting` | 仕訳ビュー・P&L計算・勘定科目マッピング等 | 稼働中 |
-| `analytics` | 管理会計分析ビュー（rpt_pnl_5stage等） | 稼働中 |
-| `assets` | Obsidian画像カタログ | 稼働中 |
+| テーブル名 | 用途 |
+|---|---|
+| 製品マスタ（product_master） | MSKU/ASINマスタ |
+| 標準原価履歴（standard_cost_history） | SKU別標準原価（年次手動更新） |
+| 購入商品マスタ・発注ロット/明細・輸入ロット/明細 | 仕入れ追跡（会計への直接影響なし） |
+| セット構成マスタ | セット商品の構成品リスト |
 
 ---
 
-## 5. accounting データセットの設計
+## 4. NocoDB 勘定科目ID（nocodb_id）頻出一覧
 
-### 5.1 accounting.journal_entries VIEW
+| nocodb_id | account_name | 分類 | freee account_item_id |
+|-----------|-------------|------|-----------------------|
+| 3 | THE直行便 | BS（代行会社預け金） | 1007507685 |
+| 5 | ESPRIME | BS（代行会社預け金） | 1007511503 |
+| 6 | 楽天銀行 | BS（現金預金） | 1007579001 |
+| 7 | YP | BS（代行会社預け金） | 1007511655 |
+| 8 | PayPay銀行 | BS（現金預金） | 1007592863 |
+| 9 | Amazon出品アカウント | BS（売掛金的口座） | 1008403397 |
+| 12 | 売掛金 | BS（売掛金） | 786598200 |
+| 17 | 商品 | BS（棚卸資産） | 786598202 |
+| 70 | 未払金 | BS（負債） | 786598249 |
+| 85 | 事業主借 | BS（純資産） | 786598262 |
+| 99 | 売上高 | PL（収益） | 786598267 |
+| 104 | 雑収入 | PL（収益） | 786598277 |
+| 105 | 為替差損益 | PL（収益/費用） | 1007603892 |
+| 109 | 仕入高 | PL（売上原価） | 786598280 |
+| 119 | 荷造運賃 | PL（経費） | 786598290 |
+| 124 | 通信費 | PL（経費） | 786598297 |
+| 125 | 広告宣伝費 | PL（経費） | 786598298 |
+| 126 | 販売手数料 | PL（経費） | 786598349 |
+| 146 | 地代家賃 | PL（経費） | 786598329 |
+| 148 | 支払手数料 | PL（経費） | 786598332 |
+| 156 | 諸会費 | PL（経費） | 786598354 |
+| 162 | 雑費 | PL（経費） | 786598367 |
+| 166 | セールモンスター | BS（売掛金的口座） | 1024091121 |
 
-**目的:** 9つのデータソースを統一した複式簿記の仕訳帳フォーマットで統合
+---
 
-**カラム構成:**
+## 5. BigQuery データセット構成
+
+| データセット | 内容 | リージョン |
+|---|---|---|
+| `nocodb` | NocoDB 全21テーブルのエクスポート先 | us-central1 |
+| `accounting` | 仕訳ビュー・P&L計算・勘定科目マッピング等 | us-central1 |
+| `sp_api_external` | SP-API raw data（精算・売上・FBA在庫等） | us |
+| `amazon_ads_external` | 広告API raw data | us |
+| `analytics` | 管理会計分析ビュー | us-central1 |
+
+---
+
+## 6. accounting データセットの主要VIEW/テーブル
+
+### 6.1 accounting.journal_entries VIEW（最重要）
+
+9つのデータソースを統一した複式簿記フォーマットで統合するVIEW。
+
+**出力カラム:**
 
 | カラム | 型 | 説明 |
 |---|---|---|
 | source_id | STRING | ソースごとのユニークID |
 | journal_date | DATE | 仕訳日 |
-| fiscal_year | INTEGER | 会計年度 |
+| fiscal_year | INTEGER | 会計年度（journal_dateのYEAR） |
 | entry_side | STRING | `debit`（借方）or `credit`（貸方） |
 | account_name | STRING | 勘定科目名 |
 | amount_jpy | INTEGER | 金額（円） |
-| tax_code | INTEGER | 税コード（Amazon精算のみ） |
+| tax_code | INTEGER | 税コード |
 | description | STRING | 摘要 |
 | source_table | STRING | データソース識別子 |
 
-**9つのデータソースと仕訳日の基準:**
+**9つのデータソース:**
 
-| source_table | データソース | 仕訳日の基準 |
+| source_table | データソース | 仕訳日基準 | 振替フィルタ |
+|---|---|---|---|
+| amazon_settlement | Amazon精算（settlement_journal_view経由） | booking_date | 振替_id付エントリは除外 |
+| amazon_nocodb | Amazon出品アカウント明細（NocoDB） | 取引日 | 振替_id IS NULL |
+| paypay_bank | PayPay銀行明細 | 取引日 | 振替_id IS NULL（例外: 相手科目が5,6,9） |
+| rakuten_bank | 楽天銀行明細 | 取引日 | 振替_id IS NULL（例外: 相手科目が3,5,6,7,8,9,70） |
+| ntt_finance | NTTファイナンスBizカード | 利用日 | is_transfer IS FALSE |
+| agency_transactions | 代行会社取引 | 取引日 | 振替_id IS NULL |
+| sale_monster | セールモンスター売上レポート | 売上日 | なし |
+| manual_journal | 手動仕訳テーブル | 仕訳日 | なし |
+| owner_contribution | 事業主借テーブル | 仕訳日 | なし |
+| inventory_adjustment | 棚卸仕訳（inventory_journal_view） | 1/1（期首）/ 12/31（期末） | なし |
+
+**振替フィルタの詳細設計（重要）:**
+
+振替テーブル（transfer_records）は口座間の資金移動を1対1でリンクする。
+各口座セクションは `振替_id IS NULL` で振替行を除外するが、以下の例外がある:
+
+| 振替パターン | 仕訳計上 | 理由 |
 |---|---|---|
-| amazon_settlement | Amazon出品アカウント明細（NocoDB） | **deposit_date**（銀行入金日） |
-| paypay_bank | PayPay銀行入出金明細 | 取引日 |
-| rakuten_bank | 楽天銀行入出金明細 | 取引日 |
-| ntt_finance | NTTファイナンスBizカード明細 | 利用日 |
-| agency_transactions | 代行会社取引 | 取引日 |
-| sale_monster | セールモンスター売上レポート | 売上日 |
-| manual_journal | 手動仕訳テーブル（8件） | 仕訳日 |
-| owner_contribution | 事業主借テーブル（124件） | 仕訳日 |
-| inventory_adjustment | 棚卸仕訳（期首・期末） | 1/1（期首）, 12/31（期末） |
+| 楽天→PayPay振替（振替_id=17,18,19） | 楽天側のみ計上 | PayPay側は例外リストに楽天(id=6)がないため除外 |
+| PayPay→ESPRIME振替（振替_id=11-14） | PayPay側で計上 | 代行会社側は除外 |
+| Amazon→楽天DEPOSIT（振替_id=1-93中多数） | 楽天側で計上 | Amazon口座側は除外 |
+| Amazon→PayPay DEPOSIT（振替_id=94-108） | PayPay側で計上 | Amazon口座側は除外 |
+| PayPay不足金支払→Amazon（振替_id=115,117等） | PayPay側で計上（Dr.Amazon口座） | Amazon明細側は除外 |
 
-**複式簿記の展開方式（各ソース共通）:**
-各トランザクションは借方（debit）と貸方（credit）の 2 行に展開される。例:
-- 楽天銀行「入金 ¥10,000」 → `(debit: 楽天銀行 ¥10,000) + (credit: 売上高等 ¥10,000)`
-- Amazon出品アカウント「売上 ¥37,744」 → `(debit: Amazon出品アカウント ¥37,744) + (credit: 売上高 ¥37,744)`
+> **NTTの振替_id**: is_transferフラグで管理（月次支払バッチへのリンク用で振替除外フラグとは別概念）
 
-**振替フィルタ（資金移動の除外）:**
-口座間の資金移動（振替）は P/L に影響しないため、`振替_id IS NULL` フィルタで除外する。
-- PayPay銀行、楽天銀行、代行会社、Amazon出品アカウント: `振替_id IS NULL` で振替行を除外
-- NTTファイナンス: `is_transfer IS FALSE` を維持（振替_id は月次支払バッチリンク用で意味が異なる）
-- 振替テーブル（transfer_records）が各口座テーブルのエントリを紐付け、二重計上を防止
+### 6.2 accounting.inventory_journal_view VIEW
 
-### 5.2 accounting.inventory_journal_view VIEW
+FBA月次在庫データ × 標準原価から棚卸仕訳を自動生成するVIEW。
 
-**目的:** FBA月次在庫データ × 標準原価から年度ごとの棚卸仕訳を自動生成
+- データソース: `sp_api_external.ledger-summary-view-data`（12月末SELLABLE在庫）× `nocodb.standard_cost_history`
+- 期首（Y/1/1）: Dr.仕入高 / Cr.商品（前年末在庫を原価振替）
+- 期末（Y/12/31）: Dr.商品 / Cr.仕入高（当年末在庫を控除）
+- **FY2025の特殊処理**: Jan 2025のみ起点を¥0に固定（FY2024末ゼロ化の二重計上防止）
 
-**データソース:**
-- `sp_api_external.ledger-summary-view-data` — 12月末のSELLABLE在庫数量
-- `nocodb.standard_cost_history` — SKU別標準原価（年次設定）
-- `nocodb.product_master` — MSKU → products_id の紐付け
+**現在の出力値（FY2025）:**
+| | 金額 |
+|---|---|
+| 期首（2025/1/1） | ¥483,968 |
+| 期末（2025/12/31） | ¥502,320（= SP-API一致） |
 
-**仕訳パターン（FY Y）:**
-- **期首（Y/1/1）:** Dr. 仕入高 / Cr. 商品 — 前年末在庫を売上原価に振替
-- **期末（Y/12/31）:** Dr. 商品 / Cr. 仕入高 — 当年末在庫を売上原価から控除
+### 6.3 accounting.pl_journal_entries VIEW
 
-**原価評価ルール:** FY Y の期首・期末ともに FY Y の標準原価で評価（effective_start_date が FY Y に含まれるコスト）
+`journal_entries` に `pl_contribution`（P&L寄与額）を付加した分析用VIEW。
 
-**年度選定:** 期首・期末の両方のデータが存在する年度のみ生成（過年度P&L保護）
+```sql
+-- P/L合計クエリ
+SELECT fiscal_year, SUM(pl_contribution) AS net_income
+FROM `main-project-477501.accounting.pl_journal_entries`
+GROUP BY fiscal_year ORDER BY fiscal_year
+```
 
-**現在の出力（2025年度）:**
-| エントリ | 金額 |
-|---------|------|
-| 期首（2025/1/1） | ¥483,968（12/2024在庫 × 2025原価） |
-| 期末（2025/12/31） | ¥502,320（12/2025在庫 × 2025原価） |
-| P&L影響 | +¥18,352（仕入高純減） |
+### 6.4 accounting.settlement_journal_view VIEW
 
-### 5.3 accounting.freee_account_mapping テーブル
+Amazon SP-API精算データを仕訳形式に変換するVIEW。各精算期間のnetamountを計算する。
 
-**目的:** journal_entries の `account_name` を freee API の `account_item_id` + `tax_code` にマッピング
+### 6.5 accounting.freee_account_mapping テーブル
 
-**カラム:** account_name, freee_account_item_id (INT64), tax_code (INT64), notes
+`account_name` → freee `account_item_id` + `tax_code` のマッピングテーブル。
 
-**税区分ルール:**
-| 科目種別 | tax_code | freee表示 |
-|---------|----------|----------|
+| 科目種別 | tax_code | 備考 |
+|---|---|---|
 | 課税売上（売上高等） | 129 | 課税売上10% |
 | 課対仕入（経費・仕入） | 136 | 課対仕入10% |
-| 非課税・対象外（銀行口座・BS等） | 2 | 対象外 |
+| 非課税・対象外（BS科目等） | 2 | 対象外 |
 
-### 5.4 accounting.freee_journal_payload_view VIEW
+### 6.6 accounting.merchant_account_rules テーブル
 
-**目的:** journal_entries（Amazon精算除外）を freee manual_journals API 形式に変換
+NTTカードの加盟店名 → 勘定科目のオーバーライドルール。
 
-**出力:** source_id, issue_date, json_details (ARRAY<STRUCT: entry_side, account_item_id, tax_code, amount, description>)
+### 6.7 nocodb.agency_account_balances VIEW
 
-**対象:** fiscal_year = 2025, source_table != 'amazon_settlement'（Amazon精算は settlement_journal_payload_view で処理）
-
-### 5.5 accounting.account_map テーブル
-
-Amazon精算レポートの `account_item_id`（freee の科目ID）を `account_name`（勘定科目名）に変換するマッピングテーブル。
-
-### 5.6 accounting.merchant_account_rules テーブル
-
-NTTファイナンスカードの加盟店名に対して勘定科目をオーバーライドするルールテーブル。
-例: 特定の加盟店名 → `研究開発費`、`地代家賃` 等に変換。
-
-### 5.7 nocodb.account_items テーブル（freee勘定科目）
-
-NocoDB の `freee勘定科目` テーブルが BQ に同期されたもの。
-会計分類の最重要マスタ。
-
-**主要カラム:**
-
-| カラム | 内容 | 例 |
-|---|---|---|
-| nocodb_id | NocoDB内部ID（手動仕訳の借方/貸方科目_idと対応） | 149 |
-| account_name | 勘定科目名 | 外注費 |
-| small_category | P&L計算に使う小分類 | 経費 / 収入金額 / 繰延資産 等 |
-| large_category | 大分類 | 損益 / 資産 / 負債 等 |
-
-**small_category の値とP&L計算への影響:**
-
-| small_category | P&L計算 | 内容 |
-|---|---|---|
-| 収入金額 | 対象（収益） | 売上高、雑収入、為替差損益等 |
-| 経費 | 対象（費用） | 外注費、通信費、広告宣伝費等 |
-| 売上原価 | 対象（費用） | 仕入高 |
-| 製品売上原価 | 対象（費用） | （現在未使用） |
-| 繰入額等 | 対象（費用） | （現在未使用） |
-| 繰延資産 | **非対象** | 開業費（P&L影響なし） |
-| 資産・負債等 | **非対象** | 銀行口座、預け金、事業主借等 |
-
-### 5.8 accounting.pl_journal_entries VIEW
-
-**目的:** `journal_entries` に `pl_contribution`（P&L寄与額）を加えた分析用ビュー
-
-**SQL定義:**
-```sql
-CREATE OR REPLACE VIEW `main-project-477501.accounting.pl_journal_entries` AS
-SELECT
-  je.*,
-  ai.small_category,
-  ai.large_category,
-  CASE
-    WHEN ai.small_category = '収入金額' AND je.entry_side = 'credit' THEN  je.amount_jpy
-    WHEN ai.small_category = '収入金額' AND je.entry_side = 'debit'  THEN -je.amount_jpy
-    WHEN ai.small_category IN ('経費','売上原価','製品売上原価','繰入額等')
-         AND je.entry_side = 'debit'  THEN -je.amount_jpy
-    WHEN ai.small_category IN ('経費','売上原価','製品売上原価','繰入額等')
-         AND je.entry_side = 'credit' THEN  je.amount_jpy
-    ELSE NULL
-  END AS pl_contribution
-FROM `main-project-477501.accounting.journal_entries` je
-LEFT JOIN `main-project-477501.nocodb.account_items` ai
-  ON je.account_name = ai.account_name
-```
-
-**pl_contribution のルール:**
-
-| 科目分類 | entry_side | pl_contribution | 意味 |
-|---|---|---|---|
-| 収入金額 | credit | +amount | 収益増加 |
-| 収入金額 | debit | -amount | 収益減少（返品・値引き・為替損失） |
-| 経費・売上原価等 | debit | -amount | 費用増加 |
-| 経費・売上原価等 | credit | +amount | 費用減少（費用戻し） |
-| 繰延資産・資産・負債等 | either | NULL | P&L 非対象 |
-
-**P&L合計の計算:**
-```sql
-SELECT fiscal_year, SUM(pl_contribution) AS net_income
-FROM `main-project-477501.accounting.pl_journal_entries`
-GROUP BY fiscal_year
-ORDER BY fiscal_year
-```
+代行会社（ESPRIME/YP/THE直行便）の残高をウィンドウ関数で自動計算するVIEW。
 
 ---
 
-## 6. P&L検証サマリ
+## 7. 振替テーブル（transfer_records）の設計
 
-| 年度 | BQ計算値（純損益） | MF確定申告値 | 状態 |
-|---|---|---|---|
-| 2023 | **-¥1,340,610** | -¥1,340,610 | ✅ 照合完了 |
-| 2024 | **-¥1,088,882** | -¥1,088,882 | ✅ 照合完了 |
-| 2025 | **-¥489,429** | （確定申告前） | 参考値 |
+口座間の資金移動を1対1でリンクするテーブル。
 
-**P&L検証クエリ:**
-```sql
-SELECT fiscal_year, SUM(pl_contribution) AS net_income
-FROM `main-project-477501.accounting.pl_journal_entries`
-WHERE fiscal_year IN (2023, 2024)
-GROUP BY 1 ORDER BY 1;
--- 期待値: 2023=-1340610, 2024=-1088882
-```
+| カラム | 型 | 説明 |
+|---|---|---|
+| id | INTEGER | 振替ID |
+| 振替日 | DATE | 資金移動日 |
+| 金額 | INTEGER | 移動金額（円） |
+| memo | TEXT | 摘要 |
 
-> 科目別P&L詳細・MFとの差異分析・差異調整仕訳の記録 → [mf_bq_reconciliation.md](mf_bq_reconciliation.md)
-> 会計方針（仕訳日基準・為替差損益・開業費・原価計算等） → [accounting_policies.md](accounting_policies.md)
+**振替リンクの種別:**
+- Amazon→楽天 DEPOSIT（振替_id 1〜93の多数）
+- Amazon→PayPay DEPOSIT（振替_id 94〜108, 2025-07以降）
+- 楽天→PayPay 振替（振替_id 17,18,19）
+- PayPay→ESPRIME 送金（振替_id 11〜14）
+- PayPay不足金→Amazon（振替_id 115,117等）
 
 ---
 
-## 7. NocoDB → BQ 同期パイプライン
+## 8. P/L照合サマリ（確定値）
+
+| 年度 | freee | MF確定申告 | 状態 |
+|---|---|---|---|
+| FY2023 | **-¥1,340,610** | -¥1,340,610 | ✅ 照合完了・申告済み |
+| FY2024 | **-¥1,088,882** | -¥1,088,882 | ✅ 照合完了・申告済み |
+| FY2025 | **-¥155,186** | （確定申告前） | freee同期完了・申告準備完了 |
+
+**FY2025 BS残高（2025-12-31確定）:**
+
+| 科目 | 残高 |
+|---|---|
+| 楽天銀行 | ¥0 |
+| PayPay銀行 | ¥171,134 |
+| Amazon出品アカウント | ¥62,866（2026/1/5入金済み・FY2026で消込） |
+| ESPRIME | ¥8,759（CNY約391元）|
+| 商品（棚卸資産） | ¥502,320 |
+| セールモンスター | ¥14,300 |
+| 工具器具備品 | ¥0（即時費用化済み） |
+| 未払金 | ¥0 |
+| 開業費（繰延資産） | ¥720,295 |
+
+---
+
+## 9. freee 同期設計
+
+**会社ID:** 11078943
+**同期方式:** BQ `journal_entries` → freee 振替伝票（manual_journals）として一括登録
+
+**同期スクリプト（年度別）:**
+```
+C:/Users/ninni/projects/gcp-main-project-477501/tmp/freee_sync_fy2023.py
+C:/Users/ninni/projects/gcp-main-project-477501/tmp/freee_sync_fy2024.py
+C:/Users/ninni/projects/gcp-main-project-477501/tmp/freee_sync_fy2025.py
+```
+
+**実行方法（重要）:**
+```
+# ⚠️ uv run は長時間でバックグラウンド化するため使用禁止
+# nocodb-to-bq の venv を直接使用する
+cd C:/Users/ninni/projects/gcp-main-project-477501
+C:/Users/ninni/projects/nocodb-to-bq/.venv/Scripts/python.exe tmp/freee_sync_fy2025.py
+```
+
+**freee の勘定科目マッピング（ACCOUNT_MAP）は freee_sync_fy2025.py 内に定義。**
+
+**注意事項:**
+- freee は FY2023 のみ会計期間が正式設定済み（trial_bs/trial_pl API が使える）
+- FY2025 は振替伝票登録のみ（API経由での残高確認不可）
+- 負金額仕訳（oc_126等）: freee登録時に借貸反転して正金額で登録する
+
+---
+
+## 10. NocoDB → BQ 同期パイプライン
 
 **スクリプト:** `C:/Users/ninni/projects/nocodb-to-bq/main.py`
-**実行方式:** 手動実行（要定期化）
+**Python環境:** `C:/Users/ninni/projects/nocodb-to-bq/.venv/Scripts/python.exe`
+**実行コマンド:**
+```
+cd C:/Users/ninni/projects/nocodb-to-bq && uv run python main.py
+```
 **同期方式:** WRITE_TRUNCATE（全件入れ替え）
 
-**SKIP_COLUMNS（同期除外カラム）:**
-```python
-SKIP_COLUMNS = {
-    "created_by", "updated_by", "nc_order",
-    "_e_X_g__",  # 不明な内部列
-}
-```
+**重要な注意事項:**
+> `nc_opau___freee勘定科目_id` は SKIP_COLUMNS に含めてはいけない。
+> このカラムは journal_entries VIEW から参照されており、除外すると VIEW が破損する。
 
-> ⚠️ **重要:** `nc_opau___freee勘定科目_id` は SKIP_COLUMNS に含めてはいけない。
-> このカラムは paypay_bank, rakuten_bank, ntt_finance, agency_transactions の各テーブルで
-> `freee勘定科目_id` として `accounting.journal_entries` VIEW から参照されているため、
-> SKIP_COLUMNS に追加すると journal_entries VIEW が破損する。
+**同期後の確認クエリ:**
+```sql
+-- Amazon出品アカウント FY別残高確認
+SELECT fiscal_year,
+  SUM(CASE WHEN entry_side='debit' THEN amount_jpy ELSE -amount_jpy END) AS balance
+FROM `main-project-477501.accounting.journal_entries`
+WHERE account_name = 'Amazon出品アカウント'
+GROUP BY 1 ORDER BY 1
+-- 期待値: FY2023=0, FY2024=0, FY2025=62866
+```
 
 ---
 
-## 8. Cloud Run ジョブ
+## 11. Cloud Run ジョブ（自動）
 
 | ジョブ名 | 内容 | 頻度 |
 |---|---|---|
 | spapi-to-gcs-daily | SP-API各種レポート（精算・売上・FBA在庫等）→ GCS | 日次 |
 | amazon-ads-to-gcs-daily | 広告APIデータ → GCS | 日次 |
-| fetch-customs-exchange-rate | 税関公示レート → GCS（参考値として保持） | 週次 |
+| fetch-customs-exchange-rate | 税関公示レート → GCS（参考値） | 週次 |
 
 ---
 
-## 9. 原価計算・会計方針
+## 12. 主要な会計ルール（詳細は accounting_policies.md 参照）
 
-→ 詳細は [accounting_policies.md](accounting_policies.md) を参照
+### 資金移動ルール
+- THE直行便→YPの直接振込は存在しない（必ず楽天銀行経由）
+- Amazon振込先: 〜2025-06は楽天銀行、2025-07以降はPayPay銀行
+- PayPay→ESPRIME送金（4件、¥900,000）は paypay_bank_statements に記録済み
 
----
+### 事業主借ルール
+- 楽天カード（個人用）= 事業主借として処理
+- freee勘定科目 nocodb_id=85, freee_account_item_id=786598262
 
-## 10. 今後の残作業
+### Amazon出品アカウント明細の符号規則
+- 正（+）: 売上収入・受取配送料
+- 負（-）: 手数料・費用・銀行送金（DEPOSIT）・不足金支払いの記帳エントリ
+- 振替_id付き行はjournal_entries VIEWから除外（相手口座側で記帳）
 
-| 作業 | 優先度 | 内容 |
-|---|---|---|
-| nocodb-to-bq 定期実行化 | 中 | 現状手動 → Cloud Run Job / スケジューラ化 |
-| 月次棚卸ビュー作成 | 中 | FBA在庫 × 標準原価 = 棚卸高 |
-| 標準原価の年次更新 | 中 | 2025年度分の標準原価を算出・登録 |
-| freee連携（振替伝票インポート） | 低 | BQ仕訳 → freee API `POST /api/1/manual_journals` |
-
-**完了済み（2026-02-25）:**
-- ✅ accounting.pl_journal_entries VIEW 作成
-- ✅ settlement基準を deposit_date に変更（差異調整仕訳 Id=193 追加）
-- ✅ 為替差損益 small_category を 経費 に変更
-- ✅ 仕訳区分カラム追加・バックフィル
-- ✅ 借方科目/貸方科目の LinkToAnotherRecord 設定
-
-**完了済み（2026-02-26）:**
-- ✅ 事業主借テーブル新規作成（開業費67件＋手動仕訳50件を統合、117件）
-- ✅ 開業費テーブル→空（重複34件+調整2件を削除、67件は事業主借に移行）
-- ✅ 手動仕訳テーブル整理（55件→5件、差異調整のみ残す）
-- ✅ 未払金→事業主借 修正（5件、¥23,075）→ BS未払金残高ゼロ化
-- ✅ 開業費残高 ¥720,295 に修正（MF確定申告値と一致）
-- ✅ journal_entries VIEW更新（⑧startup_cost削除、⑩owner_contribution追加）
-- ✅ 全年度で貸借バランス imbalance=0 確認済み
-
-**完了済み（2026-03-03）: 会計アーキテクチャ統一**
-- ✅ Step 0: データクリーンアップ（代行会社空行6件削除、NTT調整勘定科目設定、楽天銀行振替boolean修正、事業主借NULL修正）
-- ✅ Step 1: Amazon出品アカウント明細テーブル新規作成（694件、BQ settlement_journal_view から口座視点に変換）
-- ✅ Step 2: 楽天銀行 × Amazon 振替リンク（45件マッチ、振替テーブル48→93件）
-- ✅ Step 3: journal_entries VIEW 全面改修（Amazon→NoCoDB化、振替フィルタを振替_id IS NULLに統一）
-- ✅ Step 4: 手動仕訳テーブル再評価（8件、全件維持。id=191,193はBS-only調整として継続監視）
-- ✅ Step 5: 事業主借テーブル簡略化（VIEW貸方を固定値'事業主借'に変更、credit_account_id参照廃止）
-- ✅ nocodb-to-bq sync: 21テーブル（Amazon出品アカウント明細 追加）
-- ✅ 全年度 貸借バランス=0、P/L変動は NTT調整エントリ分のみ（FY2023+200, FY2025+16）
-
-**完了済み（2026-03-04）: 会計データ整備（セールモンスター口座化・代行会社丸め修正・振替リンク補完）**
-- ✅ Step 1: freee勘定科目テーブルに「セールモンスター」(id=166) を INSERT（Amazon id=9 スキーマ複製）
-- ✅ Step 1: 楽天銀行 6件・PayPay銀行 2件の freee勘定科目_id を 売掛金(12) → セールモンスター(166) に更新
-- ✅ Step 1: journal_entries VIEW ⑥ 修正（'売掛金' → 'セールモンスター'）
-- ✅ Step 1: セールモンスター残高 = ¥8,800（¥149,130入金 - ¥140,330売上）。P/L変動なし
-- ✅ Step 2: 代行会社 外貨金額 丸め修正 8件（外貨金額 = 振替金額 / 為替レート、高精度更新。全件 diff=0 確認）
-- ✅ Step 3: Amazon未リンクDEPOSIT 35件調査 → 15件を PayPay銀行 振替リンク（id=94〜108）
-  - 2025-07以降 Amazon振込先が楽天銀行→PayPay銀行に変更（14件 + 1件¥1差）
-  - 残り20件は銀行データ欠落/範囲外（P/Lには影響なし）
-- ✅ Step 4: `nocodb.agency_account_balances` VIEW 新規作成（ウィンドウ関数で残高自動計算）
-  - THE直行便・YP: diff=0（完全一致）
-  - ESPRIME: 差異は stored exchange_rate（20.63固定）と実取引レートの丸め差（±22円以内、想定内）
-  - ESPRIME最終残高: ¥106,323（外貨残高 ≈3,665.6元）
-- ✅ 全年度 P/L 不変: FY2023=-1,340,610 / FY2024=-1,088,882 / FY2025=-489,429
+### 棚卸方式
+- 三分法（購入時→商品↑、期末棚卸調整→仕入高↑/商品↓）
+- 代行会社の仕入れ = freee科目17（商品）で計上
 
 ---
 
-## 11. 参照ドキュメント・重要ファイル
+## 13. 参照ドキュメント
 
-| 種別 | 場所 |
+| 内容 | 場所 |
 |---|---|
-| 会計方針（仕訳日基準・為替・開業費・原価計算） | [accounting_policies.md](accounting_policies.md) |
-| MF vs BQ 照合記録（2023/2024） | [mf_bq_reconciliation.md](mf_bq_reconciliation.md) |
-| ゴール定義 | [goal.md](goal.md) |
-| freee再構築計画 | [../freee/freee_rebuild_plan.md](../freee/freee_rebuild_plan.md) |
-| BQ-NocoDB 同期スクリプト | `C:/Users/ninni/projects/nocodb-to-bq/main.py` |
-| 手動仕訳操作スクリプト群 | `C:/Users/ninni/projects/tmp/*.py` |
+| 会計方針（仕訳日基準・為替・原価計算） | `accounting_policies.md` |
+| MF vs BQ 照合記録（FY2023/2024） | `mf_bq_reconciliation.md` |
+| 月次・年次締め作業フロー（AI主導） | `monthly_closing_workflow.md` |
+| NocoDB→BQ 同期スクリプト | `C:/Users/ninni/projects/nocodb-to-bq/main.py` |
+| freee 同期スクリプト | `C:/Users/ninni/projects/gcp-main-project-477501/tmp/freee_sync_fy20XX.py` |
 | NocoDB SQLite DB | `C:/Users/ninni/nocodb/noco.db` |
-| NocoDB 自動バックアップ | `G:/マイドライブ/backup/nocodb/` |
 | GCP プロジェクト | main-project-477501 |
+| freee 会社ID | 11078943 |
