@@ -17,6 +17,9 @@
 | `accounting_policies.md` | 会計方針（日付基準、仕訳ルール等） |
 | `mf_bq_reconciliation.md` | MF⇔BQ照合結果と差異分析 |
 | `scheduled_queries/` | BQ Scheduled Query スクリプト |
+| `reference/accounting-rules.md` | **会計ルール（絶対遵守）← 仕訳判断時は必読** |
+| `reference/nocodb-tables.md` | NocoDB テーブル → BQ マッピング表 |
+| `reference/account-ids.md` | 勘定科目ID一覧 |
 | `tmp/` | 一時スクリプト（.gitignore対象） |
 
 ## 外部リソース
@@ -31,76 +34,6 @@
 | **MF FY2023 総勘定元帳** | `C:/Users/ninni/projects/rawdata/マネーフォワード/MF_総勘定元帳_2023年度.csv` |
 | **MF FY2024 総勘定元帳** | `C:/Users/ninni/projects/rawdata/マネーフォワード/MF_総勘定元帳_2024年度.csv` |
 | **MF FY2023 決算書** | `C:/Users/ninni/projects/rawdata/マネーフォワード/MF2023年度決算書.pdf` |
-
-## 会計ルール（絶対遵守）
-
-### 資金移動
-- **THE直行便→YPの直接資金移動は存在しない**。必ず「楽天銀行に引き落とし → 楽天銀行からYP送金」の流れ。
-- イーウーパスポート（三井住友）への振込 = YPへの預け金送金。THE直行便ではない。
-
-### 事業主借
-- MFの「楽天カード」= 個人用カード = **事業主借**。カード科目として認識する必要はない。
-- NocoDB に開業費テーブルはない。開業費は `事業主借`（owner_contribution）テーブル内のエントリ。
-
-### freee 同期
-- freee は FY2023 のみ会計期間が存在（2023/1/1-2023/12/31）
-- BQ→freee は振替伝票（manual_journals）で一括同期。同期スクリプト: `tmp/freee_sync_fy2023.py`
-- freee の口座間振替（transfers）は使わない（manual journals と二重計上になる）
-- freee には walletable-linked account と手動作成 account が重複するので注意
-
-### Amazon 会計
-- Amazon出品アカウント = 売掛金の口座。NocoDB に `Amazon出品アカウント明細` テーブルとして管理（694件）。
-- BQ settlement_journal_view から口座視点に変換して NocoDB に格納。入金=+、手数料=-、銀行送金(DEPOSIT)=-。
-- 楽天銀行への送金（DEPOSIT行）は振替テーブル経由でリンク済み（45件）。
-- 振替リンク済みの行は journal_entries VIEW から除外（二重計上防止）。
-- MF は月次集約のため構造的差異あり（Amazon出品+売掛金の合算で比較）。
-
-### 振替（資金移動）
-- 口座間の資金移動は `振替` テーブル（transfer_records）でリンク。
-- journal_entries VIEW では `振替_id IS NULL` で振替行を除外（P/Lに影響しない資金移動を排除）。
-- NTTファイナンスの振替_id は月次支払バッチへのリンク用（振替フラグではない）。
-
-## NocoDB テーブル → BQ マッピング
-
-主要テーブル（会計系、21テーブル中）:
-- `nc_opau___楽天銀行ビジネス口座入出金明細` → `nocodb.rakuten_bank_statements`
-- `nc_opau___PayPay銀行入出金明細` → `nocodb.paypay_bank_statements`
-- `nc_opau___Amazon出品アカウント明細` → `nocodb.amazon_account_statements`
-- `nc_opau___事業主借` → `nocodb.owner_contribution_entries`
-- `nc_opau___手動仕訳` → `nocodb.manual_journal_entries`
-- `nc_opau___NTTファイナンスBizカード明細` → `nocodb.ntt_finance_statements`
-- `nc_opau___freee勘定科目` → `nocodb.account_items`
-- `nc_opau___代行会社` → `nocodb.agency_transactions`
-- `nc_opau___振替` → `nocodb.transfer_records`
-
-## NocoDB 勘定科目ID（頻出）
-
-| nocodb_id | account_name |
-|-----------|-------------|
-| 3 | THE直行便 |
-| 5 | ESPRIME |
-| 6 | 楽天銀行 |
-| 7 | YP |
-| 8 | PayPay銀行 |
-| 9 | Amazon出品アカウント |
-| 12 | 売掛金 |
-| 15 | 開業費 |
-| 70 | 未払金 |
-| 85 | 事業主借 |
-| 99 | 売上高 |
-| 100 | 売上値引高 |
-| 101 | 売上戻り高 |
-| 104 | 雑収入 |
-| 105 | 為替差損益 |
-| 109 | 仕入高 |
-| 119 | 荷造運賃 |
-| 124 | 通信費 |
-| 125 | 広告宣伝費 |
-| 126 | 販売手数料 |
-| 146 | 地代家賃 |
-| 148 | 支払手数料 |
-| 156 | 諸会費 |
-| 162 | 雑費 |
 
 ## 作業手順
 
