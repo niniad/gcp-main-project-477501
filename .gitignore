@@ -1,0 +1,8 @@
+tmp/
+*.txt
+ledger_tsv/
+
+# Security
+.env*
+credentials*
+*.secret

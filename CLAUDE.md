@@ -1,9 +1,5 @@
 # CLAUDE.md — accounting
 
-## コンパクション後の復帰手順
-
-コンパクション直後は必ず: (1) この CLAUDE.md を再読 (2) 現在のタスクを確認してから再開
-
 ## プロジェクト概要
 
 個人EC事業（Amazon.co.jp）の会計・分析基盤。NocoDB → BigQuery → freee の3層構成。
@@ -17,17 +13,22 @@
 | `accounting_policies.md` | 会計方針（日付基準、仕訳ルール等） |
 | `mf_bq_reconciliation.md` | MF⇔BQ照合結果と差異分析 |
 | `scheduled_queries/` | BQ Scheduled Query スクリプト |
+| `scripts/journal_entries_view.py` | **journal_entries VIEW 定義（最重要）← 変更時はここを編集してBQに再デプロイ** |
+| `scripts/monthly_closing_audit.py` | 月次締め完了チェック（未分類取引の洗い出し） |
+| `scripts/full_audit.py` | 全テーブル完全監査 |
+| `scripts/freee_sync_fy2025.py` | freee への仕訳同期（FY2025。翌年は複製して年度変更） |
+| `scripts/create_scheduled_queries.py` | BQ Scheduled Query の登録スクリプト |
 | `reference/accounting-rules.md` | **会計ルール（絶対遵守）← 仕訳判断時は必読** |
 | `reference/nocodb-tables.md` | NocoDB テーブル → BQ マッピング表 |
 | `reference/account-ids.md` | 勘定科目ID一覧 |
-| `tmp/` | 一時スクリプト（.gitignore対象） |
+| `tmp/` | 一時スクリプト（.gitignore対象、いつ削除しても可） |
 
 ## 外部リソース
 
 | リソース | パス / ID |
 |---------|-----------|
 | **NocoDB SQLite** | `C:/Users/ninni/nocodb/noco.db` |
-| **nocodb-to-bq sync** | `cd C:/Users/ninni/projects/nocodb-to-bq && uv run python main.py` |
+| **nocodb-to-bq sync** | `cd C:/Users/ninni/infra/nocodb-to-bq && uv run python main.py` |
 | **BQ Project** | `main-project-477501` |
 | **freee スキル** | `C:/Users/ninni/.claude/skills/freee/` |
 | **freee Company ID** | `11078943` |
@@ -37,18 +38,6 @@
 
 ## 作業手順
 
-### NocoDB データ修正 → BQ 反映
-1. SQLite 直接 UPDATE: `C:/Users/ninni/nocodb/noco.db`
-2. BQ sync: `cd C:/Users/ninni/projects/nocodb-to-bq && uv run python main.py`
-3. 検証: BQ クエリで確認
-
-### freee 同期
-1. BQ sync 完了後
-2. `cd C:/Users/ninni/projects/accounting && uv run --with requests --with google-cloud-secret-manager --with google-auth --with google-cloud-bigquery python tmp/freee_sync_fy2023.py`
-3. freee API で trial_bs/trial_pl 検証
-
-## Python 実行環境
-- `uv run python` を使用
-- freee API 依存: `--with requests --with google-cloud-secret-manager --with google-auth`
-- BQ 依存: `--with google-cloud-bigquery`
-- 日本語出力: `sys.stdout.reconfigure(encoding='utf-8')` 必須
+- **NocoDB → BQ反映**: NocoDB修正後は `nocodb-to-bq` で同期し、BQクエリで整合性を検証すること
+- **freee同期**: BQ sync完了後に `scripts/freee_sync_fy2025.py` を実行し、trial_bs/trial_pl で検証
+- **sync/freeeスクリプトのパス**: 外部リソースの nocodb-to-bq と freee スキルを参照

@@ -438,7 +438,7 @@ BQ と完全一致（全年度全科目ゼロ差異）。
 | MF 2025 総勘定元帳 | `rawdata/マネーフォワード/MF_総勘定元帳_2025年度(途中).csv` (Shift-JIS) |
 | NTT 12月復旧CSV | `rawdata/NTTファイナンスBizカード明細/MYLINK_202501.csv` (Shift-JIS) |
 | NocoDB DB | `C:/Users/ninni/nocodb/noco.db` (SQLite) |
-| nocodb-to-bq sync | `C:/Users/ninni/projects/nocodb-to-bq/main.py` |
+| nocodb-to-bq sync | `C:/Users/ninni/infra/nocodb-to-bq/main.py` |
 
 ### BQ VIEWs
 

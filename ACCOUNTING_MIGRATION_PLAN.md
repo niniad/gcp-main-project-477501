@@ -38,7 +38,7 @@
 | リソース | 値 |
 |---------|---|
 | NocoDB SQLite | `C:/Users/ninni/nocodb/noco.db` |
-| BQ sync | `cd C:/Users/ninni/projects/nocodb-to-bq && uv run python main.py` |
+| BQ sync | `cd C:/Users/ninni/infra/nocodb-to-bq && uv run python main.py` |
 | BQ プロジェクト | `main-project-477501` |
 | freee Company ID | `11078943` |
 | Python実行コマンド | `uv run --with requests --with google-cloud-secret-manager --with google-auth --with google-cloud-bigquery python` |

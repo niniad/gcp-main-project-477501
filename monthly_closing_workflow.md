@@ -116,7 +116,7 @@ ORDER BY 取引日
 > 「全データ入力が完了したら、BQ同期を実行します。」
 
 ```bash
-cd C:/Users/ninni/projects/nocodb-to-bq && uv run python main.py
+cd C:/Users/ninni/infra/nocodb-to-bq && uv run python main.py
 ```
 
 ---
@@ -197,7 +197,7 @@ GROUP BY 1
 
 ```bash
 # BQ同期
-cd C:/Users/ninni/projects/nocodb-to-bq && uv run python main.py
+cd C:/Users/ninni/infra/nocodb-to-bq && uv run python main.py
 ```
 
 **AIが確認するクエリ:**
@@ -219,7 +219,7 @@ GROUP BY 1 ORDER BY 1
 **AIの実行指示:**
 ```bash
 cd C:/Users/ninni/projects/gcp-main-project-477501
-C:/Users/ninni/projects/nocodb-to-bq/.venv/Scripts/python.exe tmp/freee_sync_fy202X.py
+C:/Users/ninni/infra/nocodb-to-bq/.venv/Scripts/python.exe tmp/freee_sync_fy202X.py
 ```
 
 > 「同期が完了したら、freeeの試算表を確認してください：」
